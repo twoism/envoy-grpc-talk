@@ -1,0 +1,281 @@
+Proxying gRPC with Envoy
+
+Tags: grpc, envoy
+
+Christopher Burnett
+Lyft, Software Engineer - Core Libraries
+cburnett@lyft.com
+@twoism
+
+* Hi!
+
+- Core Libraries Eng @Lyft 
+- Formerly VSCO, Tweet Miner (TFE)
+- <3 gRPC
+
+* RPC, right?
+
+* Every ten years... (Jim Waldo)
+
+- Argus -- Liskov, 1988
+- Corba -- Kendall et al, 1994
+- WDDX -- Simeonov, 1998
+- REST Fielding, 2000
+- Hypermedia, JSON/RPC ???
+- Thrift/Finagle ~2010
+
+* RPC Today (IMHO)
+
+* gRPC at VSCO
+
+- PHP Monolith
+- Go/gRPC services
+- Protoc plugin
+
+* Protoc Plugin
+
+- Extends gRPC
+- Additional Handlers
+- Not the easiest thing ever
+
+* Example
+
+	cfg := config.New()
+	srv := hello.NewWrappedHelloWorldServer(gs, cfg)
+
+Implementation
+
+	type HelloHandler func(*Config) 
+		func(context.Context, *HelloRequest) (*HelloResponse, error)
+
+* Takeaway
+
+- This works really well
+- Scoped handlers
+- App level extension is super easy
+
+* Lyft :-)
+
+* Infra
+
+- PHP Monolith
+- Python services (HTTP/1)
+- Go/gRPC core
+
+* Go at Lyft
+
+- Tier zero services only
+- gRPC transport
+- IDL based ODM, mongo & dynamoDB
+
+* gRPC at Lyft
+
+* gRPC at Lyft
+
+- Core services
+- Extended via plugin
+- Walk AST and create files
+- Chainable interceptors
+
+* Protoc Codegen
+
+- IDL+HTTP options
+- Generated Python client/server (flask)
+
+* What does this buy us?
+
+- Standardizes API definition and I/O
+- Enforces types at the service boundary
+- IDL is still the source of truth
+
+* HTTP Options
+
+	service HelloWorldHTTP {
+	    option (http_server_options).isHttpServer = true;
+	    
+	    rpc GetHttpHello (SayHttpHelloRequest) returns (SayHttpHelloResponse) {
+	        option (http_options).path = "/api/gethello";
+	        option (http_options).method = "get";
+	        option (http_options).impl = "test_http.handle_hello_world_get";
+	    }
+	}
+
+* Generated Server
+
+	@blueprint.route('/api/gethello', methods=['GET'])
+	def get_http_hello():
+	    from test_http import handle_hello_world_get
+	    if request.headers.get('Content-Type') == 'application/proto':
+	        try:
+	            input = SayHttpHelloRequest()
+	            input.ParseFromString(request.data)
+	            # Call the actual implementation method
+	            resp = handle_hello_world_get(input)
+	            return resp.SerializeToString()
+	        except Exception as e:
+	            logger.warning(
+	                'Exception calling handle_hello_world_get on get_http_hello: {}'.format(repr(e))
+	            )
+	            raise e
+	    else:
+	        # Non proto application code goes here
+	        return handle_hello_world_get(request)
+
+* Generated Client
+
+    def get_http_hello(self, input):
+        try:
+            assert isinstance(input, SayHttpHelloRequest)
+            headers = {
+                'Content-Type': 'application/proto'
+            }
+            response = self.get(
+                '/api/gethello',
+                data=input.SerializeToString(),
+                headers=headers,
+                raw_request=True,
+                raw_response=True)
+            op = SayHttpHelloResponse()
+            op.ParseFromString(response.content)
+            
+            return op
+        except Exception as e:
+            logger.warning(
+                'Exception calling get_http_hello : {}'.format(repr(e))
+            )
+            raise e
+
+* Interceptors
+
+* Interceptors
+
+	func Handler(ctx context.Context, req interface{},
+		info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
+
+		if meta, ok := metadata.FromContext(ctx); ok {
+			if hdrs, ok := meta[RequestIDHeader]; ok {
+				if len(hdrs) > 0 {
+					ctx = context.WithValue(ctx, RequestIDHeader, hdrs[0])
+				}
+			}
+		}
+
+		return handler(ctx, req)
+	}
+
+Chaining
+
+	grpc.NewServer(
+		grpc.UnaryInterceptor(
+			interceptor.Chain(
+				headers.Handler,
+				metrics.New(ret.scope).Handler,
+		),
+	)
+
+* gRPC with Python
+
+- Confusing ecosystem (protoc/grpc-tools)
+- Dependencies++
+- Incompatible with gEvent (understandably)
+- Flaky builds (OSX, Sys Py, Homebrew)
+
+* gRPC with PHP
+
+- Confusing ecosystem (3 protobuf libs/2 forks)
+- Retries, Error handling
+- Composer
+- Pre 1.0
+
+* It's not you, it's me :-)
+
+* Solutions
+
+* IDL & Protobuf monorepo
+
+- Sync'd IDL & gen'd code commits
+- That means everything
+- Go & Py packages
+- It's totally fine
+
+* Dockerized protoc+plugins
+
+- protoc/grpc source of truth
+- Builds checked in CI
+- Uses a packagecloud.io 3.0 deb
+
+* Envoy
+
+- L7 edge & service proxy
+- Modern C++11 code base
+- HTTP/2 & gRPC fluent
+- Extensible filter architecture 
+
+* Goals
+
+The network should be transparent to applications. When network and application problems do occur it should be easy to determine the source of the problem.
+
+* History
+
+- GFE > TFE > TSA > Envoy
+
+* Design
+
+- Out of process architecture
+- Transparent to applications
+- Hot restart
+
+* Features
+
+- Service discovery
+- Protocol agnostic (HTTP/1-2, TLS, FTP)
+- Dynamic mesh routing
+- Robust stats
+
+* Topology - Front Proxy
+
+.image front-proxy.png
+
+* So what about gRPC?
+
+* gRPC
+
+Ingress/egress control allows us to "upgrade" requests
+
+* gRPC Bridge
+
+.image sts-grpc.png
+
+* Envoy gRPC Bridge 
+
+- Hinted via `Content-Type: application/grpc`
+- Responds to fully qualified methods (Hello/SayHello)
+- Protos as payload
+- Buffers trailers to HTTP/1 responses
+
+* WarGame's strategy
+
+.image Not-to-play.jpg
+
+* We prefer a game of chess :-)
+
+* Clients (and servers too)
+
+- Generated via a protoc extension
+- HTTP/1 with protobuf payloads
+- "Monorepo" pip package
+
+* Demo (yay, live coding!)
+
+* Takeaways 
+
+- Dynamic language eco's make things hard
+- proto3 is dope
+- Annotations especially 
+- Protoc is cumbersome but super powerful
+
+* Everything else is 💯
+
+Thank you for all of your work!
+
+
